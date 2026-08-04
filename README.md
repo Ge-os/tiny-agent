@@ -6,6 +6,32 @@ Coding agent harness for tiny LLMs (0.5B–3B). Оптимизирован по�
 
 ---
 
+## Статус реализации (2026-08)
+
+**MVP реализован и протестирован на Qwen3.5 0.8B (llama.cpp, `http://127.0.0.1:8080`).**
+
+| Этап | Статус | Результат теста на 0.8B |
+|---|---|---|
+| Agent loop (ls → ответ) | ✅ | Модель вызывает `ls`, получает дерево, отвечает текстом. Repeat-guard блокирует повторные `ls`. |
+| Создание файла (`write_file`) | ✅ | `calc.py` создан корректно. Повторная запись в существующий файл заблокирована (guard). |
+| Редактирование (`edit_file`) | ✅ | `sub()` добавлена в `calc.py`. Idempotency-guard не даёт повторно применить ту же правку. |
+| Architect → `ARCHITECTURE.md` | ✅ | Сгенерирован полный документ (обзор, компоненты, data model, API, tech choices). |
+| Planner → `TASKS.md` | ✅ | Двухфазный механизм: модель пишет текст → харнес сохраняет в файл. |
+| Implementer → `*.py` | ✅ | `temperature.py` сгенерирован, синтаксис валиден, тесты проходят. |
+| Tester (bash + pytest) | ⚠️ | Guard-ы и субагент работают, но 0.8B деградирует на длинных сессиях (>5K токенов) — нужна более сильная модель или ручной режим. |
+| Judge | ✅ | Score 100 (хороший кейс) / 70 (плохой кейс). Правила сохраняются в `.tiny-agent/rules/`. |
+| Субагент-корректор | ✅ | Исправляет неверные пути (`hello.py` вместо `.tiny-agent/hello.py`), оборачивает команды в `bash`. |
+
+**Ключевые выводы из тестирования 0.8B:**
+1. **Thinking надо отключать** (`chat_template_kwargs: {"enable_thinking": false}`) — иначе модель тратит весь бюджет токенов на `reasoning_content` и отвечает пустотой.
+2. **Двухфазная генерация артефактов** — 0.8B не может выдать длинный `write_file` в tool-call режиме (обрезка по max_tokens, repetition). Рабочая схема: модель пишет контент текстом → харнес сохраняет в файл.
+3. **Агрессивный compaction на 4K** — модель деградирует после ~5K токенов контекста, поэтому суммаризация должна срабатывать раньше, чем на 80% окна.
+4. **Репитиция**: 0.8B повторяет фразы и вызовы. Нужны все три механизма: window-loop-detector, text-repetition-detector, path-blacklist.
+5. **`2>&1` ложно блокировался** как shell-write — исправлено (redirect descriptors не считаются записью файла).
+6. **Рестарт с суммаризацией вреден для 0.8B** — суммаризация генерирует новые галлюцинации (`PROJECT_ROOT/...`). Приоритет: force-complete → two-phase → (только потом) restart.
+
+---
+
 ## Содержание
 
 - [Концепция](#концепция)
@@ -918,61 +944,67 @@ tiny-agent/
 ```bash
 git clone https://github.com/user/tiny-agent.git
 cd tiny-agent
-pip install -e .
+python -m venv .venv
+.venv\Scripts\activate        # Windows (или source .venv/bin/activate)
+pip install -r requirements.txt
 ```
 
 ### Запуск локальной модели
 
 ```bash
-# llama.cpp
-git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
-cmake -B build
-cmake --build build --config Release -j
-build/bin/llama-server -m /path/to/Qwen3.5-0.8B-Q5_K_M.gguf \
+# llama.cpp (сервер должен быть запущен на http://127.0.0.1:8080)
+llama-server -m /path/to/Qwen3.5-0.8B-Q5_K_M.gguf \
   --host 127.0.0.1 --port 8080 \
-  -c 8192 -ngl 99
-
-# Ollama
-ollama pull qwen3.5:0.8b
+  -c 65536 -ngl 99
 ```
+
+> ⚠️ **Важно**: Qwen3.5 — reasoning-модель. tiny-agent отключает thinking через
+> `chat_template_kwargs: {"enable_thinking": false}`, иначе весь бюджет токенов уходит в размышления.
 
 ### Запуск tiny-agent
 
 ```bash
-# В корне проекта
-tiny-agent
+# Интерактивный режим в текущей папке (создаётся .tiny-agent/)
+python app/main.py
 
-# С указанием модели
-tiny-agent --model groq-llama-8b
+# Работа в другом проекте
+python app/main.py --cwd /path/to/project
 
-# Автономный режим
-tiny-agent --auto
+# Роль агента: coder | architect | planner | implementer | tester | reviewer
+python app/main.py --cwd /path/to/project --agent architect
 
-# План-режим
-tiny-agent --plan-mode "Создай REST API для блога"
+# Одноразовый промпт (non-interactive)
+python app/main.py --cwd /path/to/project -p "Create ARCHITECTURE.md for..."
 
-# Список доступных моделей
-tiny-agent --list-models
+# Список моделей и ролей
+python app/main.py --list-models
+python app/main.py --list-agents
 ```
+
+При первом запуске в целевой папке создаётся `.tiny-agent/` с `config.json` и `rules/`.
+LLM-as-judge подключается автоматически, если в `config.json` есть облачная модель с ключом в env.
 
 ---
 
 ## Roadmap / План разработки
 
-### Фаза 1: Минимальный жизнеспособный агент (MVP)
-- [ ] `app/api.py` — OpenAI-клиент с кастомной обработкой tool calling
-- [ ] `tools/` — 5 базовых инструментов: read_file, write_file, edit_file, bash, glob
-- [ ] `app/loop.py` — базовый agent loop
-- [ ] `app/context.py` — сборка контекста с ограничениями
-- [ ] `front/` — минимальный Textual TUI (ввод + вывод)
-- [ ] `config.json` — конфигурация моделей
-- [ ] **Критерий**: модель 0.8B может прочитать файл и ответить на вопрос о нём
+### Фаза 1: Минимальный жизнеспособный агент (MVP) — ✅ выполнено
+- [x] `app/api.py` — OpenAI-клиент с кастомной обработкой tool calling
+- [x] `tools/` — 7 инструментов: read_file, write_file, edit_file, bash, ls, glob, grep
+- [x] `app/loop.py` — agent loop с анти-цикловыми защитами
+- [x] `app/context.py` — сборка контекста (tail messages, KV-cache, дедупликация)
+- [x] `front/` — минимальный TUI (prompt_toolkit, non-TTY fallback)
+- [x] `config.json` — конфигурация моделей (llama.cpp, Groq, Cerebras, Gemini)
+- [x] **Критерий**: модель 0.8B читает файл и отвечает на вопрос о нём
 
-### Фаза 2: Tool Calling Recovery
-- [ ] Text parser для fenced JSON / `<tool_call>`
-- [ ] Similarity match для hallucinated tool names
-- [ ] `app/subagent.py` — саб-агент для исправления вызовов
-- [ ] Guard-ы: write-guard, read-guard, edit-guard, permission-gate
+### Фаза 2: Tool Calling Recovery — ✅ выполнено (базово)
+- [x] Text parser для fenced JSON / `<tool_call>` (app/api.py)
+- [x] Similarity match для hallucinated tool names (difflib)
+- [x] `app/subagent.py` — субагент-корректор с RAG-справкой
+- [x] Guard-ы: write-guard, read-guard, edit-guard, permission-gate
+- [x] Loop detector (window-based) + path-blacklist + text-repetition
+- [x] Idempotency-guard для write/edit + read-repeat-guard
+- [x] Двухфазная генерация артефактов (модель → текст → харнес → файл)
 - [ ] Loop detector (3 повтора → restart)
 - [ ] **Критерий**: модель восстанавливается после сломанных tool calls в 80% случаев
 

@@ -1,0 +1,41 @@
+{
+  "default_model": "qwen-0.8b",
+  "models": [
+    {
+      "name": "qwen-0.8b",
+      "provider": "llamacpp",
+      "model": "qwen-3.5-0.8b",
+      "endpoint": "http://127.0.0.1:8080/v1",
+      "api_key_env": null,
+      "context_window": 8192,
+      "max_tokens": 1024
+    },
+    {
+      "name": "groq-llama-8b",
+      "provider": "groq",
+      "model": "llama-3.1-8b-instant",
+      "endpoint": "https://api.groq.com/openai/v1",
+      "api_key_env": "GROQ_API",
+      "context_window": 128000,
+      "max_tokens": 8192
+    },
+    {
+      "name": "cerebras-gpt-oss",
+      "provider": "cerebras",
+      "model": "gpt-oss-120b",
+      "endpoint": "https://api.cerebras.ai/v1",
+      "api_key_env": "CEREBRAS_API",
+      "context_window": 131072,
+      "max_tokens": 8192
+    },
+    {
+      "name": "gemma-26b",
+      "provider": "gemini",
+      "model": "gemma-4-26b-a4b-it",
+      "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api_key_env": "GOOGLE_API",
+      "context_window": 32768,
+      "max_tokens": 8192
+    }
+  ]
+}
